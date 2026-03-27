@@ -45,7 +45,22 @@ model User {
   tasks                     Task[]
   files                     File[]
   documents                 Document[]
+  documentFolders           DocumentFolder[]
   signatureImages           SignatureImage[]
+}
+
+/// User-defined folder for organizing document templates (default name: MyFolder).
+model DocumentFolder {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  name      String
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  documents Document[]
+
+  @@unique([userId, name])
 }
 
 model Document {
@@ -56,10 +71,46 @@ model Document {
   status          DocumentStatus   @default(DRAFT)
   fileUrl         String
 
+  /// When the template was first sent for signing (Submissions tab).
+  sentAt          DateTime?
+
   user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId          String
 
+  folderId String
+  folder   DocumentFolder @relation(fields: [folderId], references: [id], onDelete: Restrict)
+
+  parties         DocumentParty[]
   signatureFields SignatureField[]
+  appends         DocumentAppend[]
+}
+
+/// A signer / counterparty slot on a document (First party, Second party, …).
+model DocumentParty {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+  sortOrder  Int
+  label      String
+
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  signatureFields SignatureField[]
+
+  @@unique([documentId, sortOrder])
+}
+
+/// Additional PDFs merged into a document template after the base `Document.fileUrl`.
+model DocumentAppend {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+  sortOrder  Int
+  fileUrl    String
+
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, sortOrder])
 }
 
 model SignatureField {
@@ -72,6 +123,9 @@ model SignatureField {
 
   document   Document           @relation(fields: [documentId], references: [id], onDelete: Cascade)
   documentId String
+
+  documentParty   DocumentParty @relation(fields: [documentPartyId], references: [id], onDelete: Cascade)
+  documentPartyId String
 }
 
 model SignatureImage {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { routes } from "wasp/client/router";
+import { cn } from "./utils";
 import { Toaster } from "../client/components/ui/toaster";
 import "./Main.css";
 import NavBar from "./components/NavBar/NavBar";
@@ -37,6 +38,18 @@ export default function App() {
     return location.pathname.startsWith("/admin");
   }, [location]);
 
+  /** Full-width document workspace: `/documents/:uuid/edit` or `/preview`, not the list. */
+  const isDocumentEditorFullBleed = useMemo(() => {
+    return /^\/documents\/[0-9a-f-]{36}\/(edit|preview)$/i.test(
+      location.pathname,
+    );
+  }, [location]);
+
+  /** Documents dashboard list uses full width for the data workspace. */
+  const isDocumentsDashboardFullBleed = useMemo(() => {
+    return location.pathname === "/documents";
+  }, [location]);
+
   useEffect(() => {
     if (location.hash) {
       const id = location.hash.replace("#", "");
@@ -57,7 +70,13 @@ export default function App() {
             {shouldDisplayAppNavBar && (
               <NavBar navigationItems={navigationItems} />
             )}
-            <div className="mx-auto max-w-screen-2xl">
+            <div
+              className={cn(
+                isDocumentEditorFullBleed || isDocumentsDashboardFullBleed
+                  ? "w-full max-w-none"
+                  : "mx-auto max-w-screen-2xl",
+              )}
+            >
               <Outlet />
             </div>
           </>

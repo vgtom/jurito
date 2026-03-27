@@ -1,0 +1,1 @@
+wasp start db --db-volume-mount-path /var/lib/postgresql18/jurito/data
