@@ -22,6 +22,8 @@ enum SignatureFieldType {
   SIGNATURE
   INITIALS
   DATE
+  TEXT
+  IMAGE
 }
 
 model User {

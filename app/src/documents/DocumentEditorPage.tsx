@@ -19,7 +19,8 @@ import {
   ChevronDown,
   ChevronRight,
   Eye,
-  FilePlus,
+  FileText,
+  Image as ImageIcon,
   Loader2,
   PenLine,
   Plus,
@@ -49,13 +50,6 @@ import {
   DropdownMenuTrigger,
 } from "../client/components/ui/dropdown-menu";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "../client/components/ui/card";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -67,8 +61,6 @@ import { Input } from "../client/components/ui/input";
 import { Label } from "../client/components/ui/label";
 import { toast } from "../client/hooks/use-toast";
 import { cn } from "../client/utils";
-import { SignaturePad } from "./SignaturePad";
-
 /** Mirrors server `PdfPart` from `getDocumentForEditor` — keep in sync. */
 type PdfPart = {
   partId: string;
@@ -83,6 +75,8 @@ const SignatureFieldType = {
   SIGNATURE: "SIGNATURE",
   INITIALS: "INITIALS",
   DATE: "DATE",
+  TEXT: "TEXT",
+  IMAGE: "IMAGE",
 } as const;
 
 type SignatureFieldTypeValue =
@@ -91,7 +85,9 @@ type SignatureFieldTypeValue =
 function fieldTypeTitle(t: SignatureFieldTypeValue): string {
   if (t === SignatureFieldType.SIGNATURE) return "Signature";
   if (t === SignatureFieldType.INITIALS) return "Initials";
-  return "Date";
+  if (t === SignatureFieldType.DATE) return "Date";
+  if (t === SignatureFieldType.TEXT) return "Text";
+  return "Image";
 }
 
 function fieldRowLabel(f: EditorField): string {
@@ -177,13 +173,7 @@ function FieldOverlayLayer({
             }}
             className="border-primary/80 bg-primary/10 flex flex-col items-center justify-center gap-0.5 rounded border-2 border-dashed px-1 text-center text-xs font-medium leading-tight"
           >
-            <span>
-              {f.type === SignatureFieldType.SIGNATURE
-                ? "Signature"
-                : f.type === SignatureFieldType.INITIALS
-                  ? "Initials"
-                  : "Date"}
-            </span>
+            <span>{fieldTypeTitle(f.type)}</span>
             {readOnly && f.partyLabel ? (
               <span className="text-muted-foreground max-w-full truncate text-[10px] font-normal">
                 {f.partyLabel}
@@ -839,8 +829,9 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   }
 
   return (
-    <div className="bg-background mx-auto box-border flex h-[calc(100dvh-3.5rem)] min-h-0 w-full max-w-[1920px] flex-col overflow-hidden px-4 sm:px-6 lg:px-10">
-      <header className="border-border bg-card/80 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b py-3 backdrop-blur">
+    <div className="bg-muted/45 flex h-[calc(100dvh-3.5rem)] min-h-0 flex-col overflow-hidden">
+      <div className="mx-auto box-border flex min-h-0 w-full max-w-[1920px] flex-1 flex-col px-4 pb-3 pt-2 sm:px-6 lg:px-10">
+      <header className="border-border mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 shadow-sm">
         <nav
           className="text-muted-foreground flex min-w-0 max-w-[55%] items-center gap-1.5 text-sm"
           aria-label="Breadcrumb"
@@ -935,9 +926,9 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 items-stretch overflow-hidden">
-        {/* Left: template parts + append — own scroll (needs bounded parent height) */}
-        <aside className="border-border flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r">
+      <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-hidden">
+        {/* Left: thumbnails (scroll) + Add document pinned like reference UI */}
+        <aside className="border-border flex min-h-0 w-56 shrink-0 flex-col overflow-hidden rounded-xl border bg-card shadow-sm">
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-3 py-3 [scrollbar-gutter:stable]">
           <p className="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">
             Template parts
@@ -954,8 +945,9 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
               </div>
             ))}
           </div>
+          </div>
           {!isPreview && isDraft && (
-            <>
+            <div className="border-border shrink-0 border-t bg-card px-3 py-3">
               <input
                 ref={appendFileInputRef}
                 type="file"
@@ -967,48 +959,25 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
                 type="button"
                 variant="outline"
                 size="sm"
-                className="mt-4 w-full"
+                className="w-full text-xs font-semibold uppercase tracking-wide"
                 disabled={appending}
                 onClick={() => appendFileInputRef.current?.click()}
               >
                 {appending ? (
                   <Loader2 className="mr-1 h-4 w-4 animate-spin" />
                 ) : (
-                  <FilePlus className="mr-1 h-4 w-4" />
+                  <Plus className="mr-1 h-4 w-4" />
                 )}
-                Append document
+                Add document
               </Button>
-            </>
+            </div>
           )}
-          {!isPreview && (
-          <PremiumFeature gated={signGated}>
-            <Card className="mt-4">
-              <CardHeader className="p-3 pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm">
-                  <PenLine className="h-4 w-4" />
-                  Saved signature
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  PNG for signing fields
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="p-3 pt-0">
-                <SignaturePad
-                  onSaved={async () => {
-                    toast({ title: "Signature saved to your account" });
-                  }}
-                />
-              </CardContent>
-            </Card>
-          </PremiumFeature>
-          )}
-          </div>
         </aside>
 
-        {/* Middle: one continuous stack — template + all appends; single vertical scroll */}
+        {/* Middle: one continuous stack — white canvas, centered PDF */}
         <main
           ref={scrollRef}
-          className="bg-muted/20 flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto overflow-x-hidden overscroll-contain px-3 py-4 [scrollbar-gutter:stable]"
+          className="border-border flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto overflow-x-hidden overscroll-contain rounded-xl border bg-card px-3 py-4 shadow-sm [scrollbar-gutter:stable]"
         >
           {pdfError && (
             <p className="text-destructive mb-2 w-full max-w-full text-sm">
@@ -1052,15 +1021,14 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
           })}
         </main>
 
-        {/* Right: parties (scroll) + field types (fixed below) */}
-        <aside className="border-border flex h-full min-h-0 w-80 shrink-0 flex-col overflow-hidden border-l bg-muted/30">
-          {/* Parties — scrolls when there are many */}
-          <div className="flex min-h-0 flex-1 flex-col px-3 pt-3">
+        {/* Right: top half Parties (scroll) · bottom half Field types */}
+        <aside className="border-border flex min-h-0 w-80 shrink-0 flex-col overflow-hidden rounded-xl border bg-card shadow-sm">
+          <section className="border-border flex min-h-0 flex-1 basis-0 flex-col border-b px-3 pt-3">
             <p className="text-muted-foreground mb-2 shrink-0 text-xs font-semibold uppercase tracking-wider">
               Parties
             </p>
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 [-ms-overflow-style:auto] [scrollbar-gutter:stable]">
-              <div className="flex flex-col gap-2.5 pb-1">
+              <div className="flex flex-col gap-2.5 pb-2">
                 {parties.map((p) => {
                   const pFields = fieldsForParty(p.id);
                   return (
@@ -1177,12 +1145,11 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
                 )}
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* Field types — fixed below parties; preview shows help text only */}
-          <div className="border-border bg-background/95 shrink-0 border-t px-3 py-3 shadow-[0_-4px_12px_-4px_rgba(0,0,0,0.08)] backdrop-blur-sm">
+          <section className="flex min-h-0 flex-1 basis-0 flex-col px-3 pb-3 pt-3">
             {isPreview ? (
-              <>
+              <div className="flex min-h-0 flex-1 flex-col justify-center">
                 <p className="text-muted-foreground mb-1 text-xs font-semibold uppercase tracking-wider">
                   Preview
                 </p>
@@ -1197,13 +1164,13 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
                   </Link>
                   .
                 </p>
-              </>
+              </div>
             ) : (
-              <>
-                <p className="text-muted-foreground mb-1 text-xs font-semibold uppercase tracking-wider">
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                <p className="text-muted-foreground mb-1 shrink-0 text-xs font-semibold uppercase tracking-wider">
                   Field types
                 </p>
-                <p className="text-muted-foreground mb-3 text-xs leading-snug">
+                <p className="text-muted-foreground mb-2 shrink-0 text-xs leading-snug">
                   {isDraft && selectedPartyId ? (
                     <>
                       Add to{" "}
@@ -1223,50 +1190,77 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
                 </p>
                 {isDraft && (
                   <PremiumFeature gated={signGated}>
-                    <div className="flex flex-col gap-2">
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="justify-start"
-                        disabled={!selectedPartyId}
-                        onClick={() => addField(SignatureFieldType.SIGNATURE)}
-                      >
-                        <PenLine className="mr-2 h-4 w-4" />
-                        Signature
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="justify-start"
-                        disabled={!selectedPartyId}
-                        onClick={() => addField(SignatureFieldType.INITIALS)}
-                      >
-                        <Type className="mr-2 h-4 w-4" />
-                        Initials
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="justify-start"
-                        disabled={!selectedPartyId}
-                        onClick={() => addField(SignatureFieldType.DATE)}
-                      >
-                        <Calendar className="mr-2 h-4 w-4" />
-                        Date
-                      </Button>
+                    <div className="min-h-0 flex-1 overflow-y-auto pr-0.5 [scrollbar-gutter:stable]">
+                      <div className="grid grid-cols-3 gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="text-muted-foreground hover:text-foreground flex h-auto min-h-[4.25rem] flex-col items-center justify-center gap-1 px-1 py-2.5 text-[10px] font-medium leading-tight"
+                          disabled={!selectedPartyId}
+                          onClick={() =>
+                            addField(SignatureFieldType.SIGNATURE)
+                          }
+                        >
+                          <PenLine className="text-foreground h-5 w-5 shrink-0" />
+                          Signature
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="text-muted-foreground hover:text-foreground flex h-auto min-h-[4.25rem] flex-col items-center justify-center gap-1 px-1 py-2.5 text-[10px] font-medium leading-tight"
+                          disabled={!selectedPartyId}
+                          onClick={() =>
+                            addField(SignatureFieldType.INITIALS)
+                          }
+                        >
+                          <Type className="text-foreground h-5 w-5 shrink-0" />
+                          Initials
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="text-muted-foreground hover:text-foreground flex h-auto min-h-[4.25rem] flex-col items-center justify-center gap-1 px-1 py-2.5 text-[10px] font-medium leading-tight"
+                          disabled={!selectedPartyId}
+                          onClick={() => addField(SignatureFieldType.DATE)}
+                        >
+                          <Calendar className="text-foreground h-5 w-5 shrink-0" />
+                          Date
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="text-muted-foreground hover:text-foreground flex h-auto min-h-[4.25rem] flex-col items-center justify-center gap-1 px-1 py-2.5 text-[10px] font-medium leading-tight"
+                          disabled={!selectedPartyId}
+                          onClick={() => addField(SignatureFieldType.TEXT)}
+                        >
+                          <FileText className="text-foreground h-5 w-5 shrink-0" />
+                          Text
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="text-muted-foreground hover:text-foreground flex h-auto min-h-[4.25rem] flex-col items-center justify-center gap-1 px-1 py-2.5 text-[10px] font-medium leading-tight"
+                          disabled={!selectedPartyId}
+                          onClick={() => addField(SignatureFieldType.IMAGE)}
+                        >
+                          <ImageIcon className="text-foreground h-5 w-5 shrink-0" />
+                          Image
+                        </Button>
+                      </div>
                     </div>
                   </PremiumFeature>
                 )}
                 {!isDraft && (
-                  <p className="text-muted-foreground text-sm">
+                  <p className="text-muted-foreground mt-1 text-sm">
                     This document is no longer editable. All parties&apos; fields
                     are shown on the PDF.
                   </p>
                 )}
-              </>
+              </div>
             )}
-          </div>
+          </section>
         </aside>
+      </div>
       </div>
 
       <Dialog
