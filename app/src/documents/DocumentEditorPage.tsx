@@ -7,6 +7,7 @@ import {
   addDocumentParty,
   appendPdfToTemplate,
   getDocumentForEditor,
+  getSigningContacts,
   removeDocumentParty,
   saveFields,
   sendDocument,
@@ -43,6 +44,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { PremiumFeature } from "../client/components/billing/PremiumFeature";
 import { Button } from "../client/components/ui/button";
+import { Checkbox } from "../client/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -368,6 +370,11 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   const [partySettingsId, setPartySettingsId] = useState<string | null>(null);
   const [partySettingsLabel, setPartySettingsLabel] = useState("");
   const [savingPartyLabel, setSavingPartyLabel] = useState(false);
+  const [sendModalOpen, setSendModalOpen] = useState(false);
+  const [preserveSigningOrder, setPreserveSigningOrder] = useState(false);
+  const [signerByPartyId, setSignerByPartyId] = useState<
+    Record<string, { name: string; email: string }>
+  >({});
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const pageWrapRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -378,6 +385,10 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
     documentId ? { documentId } : undefined,
     { enabled: !!documentId },
   );
+
+  const { data: signingContacts = [] } = useQuery(getSigningContacts, undefined, {
+    enabled: !!user && !isPreview && !!documentId,
+  });
 
   const parts = data?.parts ?? [];
   const partsKey = parts.map((p) => p.partId).join(",");
@@ -404,6 +415,81 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   }, [parts, partPageCounts, currentPage]);
 
   const parties = data?.parties ?? [];
+
+  const openSendModal = () => {
+    if (!parties.length) {
+      toast({
+        title: "No parties",
+        description: "Add at least one party before sending.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const next: Record<string, { name: string; email: string }> = {};
+    for (const p of parties) {
+      next[p.id] = {
+        name: p.signerName?.trim() ?? "",
+        email: p.signerEmail?.trim() ?? "",
+      };
+    }
+    setSignerByPartyId(next);
+    setPreserveSigningOrder(false);
+    setSendModalOpen(true);
+  };
+
+  const handleConfirmSendDocument = async () => {
+    if (!documentId) return;
+    const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    for (const p of parties) {
+      const row = signerByPartyId[p.id];
+      if (!row?.name?.trim() || !row?.email?.trim()) {
+        toast({
+          title: "Missing signer details",
+          description: `Enter name and email for ${p.label}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      if (!emailRe.test(row.email.trim())) {
+        toast({
+          title: "Invalid email",
+          description: `Check the address for ${p.label}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+    setSending(true);
+    try {
+      await sendDocument({
+        documentId,
+        preserveSigningOrder,
+        parties: parties.map((p) => ({
+          partyId: p.id,
+          signerName: signerByPartyId[p.id]!.name.trim(),
+          signerEmail: signerByPartyId[p.id]!.email.trim(),
+        })),
+      });
+      toast({
+        title: "Document sent",
+        description: "Invites have been emailed. Fields are now locked.",
+      });
+      setSendModalOpen(false);
+      await refetch();
+    } catch (e: unknown) {
+      const message =
+        e && typeof e === "object" && "message" in e
+          ? String((e as { message: string }).message)
+          : "Send failed";
+      toast({
+        title: "Could not send",
+        description: message,
+        variant: "destructive",
+      });
+    } finally {
+      setSending(false);
+    }
+  };
 
   const fieldsForOverlay = useMemo(() => {
     if (isPreview || !isDraft) return localFields;
@@ -612,28 +698,6 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
       });
     } finally {
       setAddingParty(false);
-    }
-  };
-
-  const handleSendDocument = async () => {
-    if (!documentId) return;
-    setSending(true);
-    try {
-      await sendDocument({ documentId });
-      toast({ title: "Document sent", description: "Fields are now locked." });
-      await refetch();
-    } catch (e: unknown) {
-      const message =
-        e && typeof e === "object" && "message" in e
-          ? String((e as { message: string }).message)
-          : "Send failed";
-      toast({
-        title: "Could not send",
-        description: message,
-        variant: "destructive",
-      });
-    } finally {
-      setSending(false);
     }
   };
 
@@ -912,7 +976,7 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
                 size="sm"
                 variant="default"
                 disabled={sending}
-                onClick={() => void handleSendDocument()}
+                onClick={() => openSendModal()}
               >
                 {sending ? (
                   <Loader2 className="mr-1 h-4 w-4 animate-spin" />
@@ -1262,6 +1326,144 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
         </aside>
       </div>
       </div>
+
+      <Dialog
+        open={sendModalOpen}
+        onOpenChange={(open) => {
+          setSendModalOpen(open);
+          if (!open) setPreserveSigningOrder(false);
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Send for signing</DialogTitle>
+            <DialogDescription>
+              Enter each signer&apos;s name and email. Saved contacts appear as
+              suggestions while you type.
+            </DialogDescription>
+          </DialogHeader>
+          <datalist id="signing-contact-names">
+            {signingContacts.map((c) => (
+              <option key={`n-${c.id}`} value={c.name} />
+            ))}
+          </datalist>
+          <datalist id="signing-contact-emails">
+            {signingContacts.map((c) => (
+              <option key={`e-${c.id}`} value={c.email} />
+            ))}
+          </datalist>
+          <div className="max-h-[min(50vh,320px)] space-y-4 overflow-y-auto pr-1">
+            {parties.map((p) => (
+              <div
+                key={p.id}
+                className="border-border space-y-2 rounded-lg border p-3"
+              >
+                <p className="text-sm font-medium">{p.label}</p>
+                <div className="space-y-2">
+                  <Label htmlFor={`sign-name-${p.id}`}>Full name</Label>
+                  <Input
+                    id={`sign-name-${p.id}`}
+                    list="signing-contact-names"
+                    autoComplete="name"
+                    value={signerByPartyId[p.id]?.name ?? ""}
+                    onChange={(e) =>
+                      setSignerByPartyId((prev) => ({
+                        ...prev,
+                        [p.id]: {
+                          name: e.target.value,
+                          email: prev[p.id]?.email ?? "",
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor={`sign-email-${p.id}`}>Email</Label>
+                  <Input
+                    id={`sign-email-${p.id}`}
+                    type="email"
+                    list="signing-contact-emails"
+                    autoComplete="email"
+                    value={signerByPartyId[p.id]?.email ?? ""}
+                    onChange={(e) =>
+                      setSignerByPartyId((prev) => ({
+                        ...prev,
+                        [p.id]: {
+                          name: prev[p.id]?.name ?? "",
+                          email: e.target.value,
+                        },
+                      }))
+                    }
+                    onBlur={() => {
+                      const email = signerByPartyId[p.id]?.email?.trim() ?? "";
+                      if (!email) return;
+                      const match = signingContacts.find(
+                        (c) =>
+                          c.email.toLowerCase() === email.toLowerCase(),
+                      );
+                      if (
+                        match &&
+                        !(signerByPartyId[p.id]?.name?.trim() ?? "")
+                      ) {
+                        setSignerByPartyId((prev) => ({
+                          ...prev,
+                          [p.id]: {
+                            name: match.name,
+                            email: prev[p.id]?.email ?? email,
+                          },
+                        }));
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-start gap-3 rounded-md border border-dashed p-3">
+            <Checkbox
+              id="preserve-order"
+              checked={preserveSigningOrder}
+              onCheckedChange={(v) =>
+                setPreserveSigningOrder(v === true)
+              }
+            />
+            <div className="grid gap-1">
+              <Label
+                htmlFor="preserve-order"
+                className="cursor-pointer text-sm font-medium leading-none"
+              >
+                Preserve order
+              </Label>
+              <p className="text-muted-foreground text-xs">
+                When checked, only the first signer is invited now; the next
+                signer is emailed after the previous one finishes. Otherwise,
+                everyone is invited at once.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setSendModalOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={sending}
+              onClick={() => void handleConfirmSendDocument()}
+            >
+              {sending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="mr-1 h-4 w-4" />
+              )}
+              Send invites
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={partySettingsOpen}

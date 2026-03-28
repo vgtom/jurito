@@ -110,6 +110,29 @@ export async function uploadFile(params: UploadFileParams): Promise<string> {
 }
 
 /**
+ * Read an object from the documents bucket into memory (e.g. for duplicating templates).
+ */
+export async function downloadObjectBuffer(objectKey: string): Promise<Buffer> {
+  const minio = getObjectStorageClient();
+  const bucket = getDocumentsBucket();
+  try {
+    const stream = await minio.getObject(bucket, objectKey);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  } catch (err) {
+    console.error("[objectStorage] download failed:", err);
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new HttpError(
+      503,
+      `Could not read file from storage (${detail}).`,
+    );
+  }
+}
+
+/**
  * Presigned GET URL for an object (for downloads / previews).
  */
 export async function getPresignedUrl(

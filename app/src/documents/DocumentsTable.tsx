@@ -1,14 +1,15 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { type Document, type DocumentFolder } from "wasp/entities";
 import {
   deleteDocument,
+  duplicateDocument,
   getDocuments,
   getFolders,
   moveDocumentToFolder,
   useQuery,
 } from "wasp/client/operations";
 import { Link, routes } from "wasp/client/router";
-import { Eye, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
+import { Copy, Eye, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
 
 import { Badge } from "../client/components/ui/badge";
 import { Button } from "../client/components/ui/button";
@@ -63,6 +64,7 @@ type DocumentsTableProps = {
 export function DocumentsTable({ folderFilter, className }: DocumentsTableProps) {
   const { data: documents, isLoading, refetch, error } = useQuery(getDocuments);
   const { data: folders } = useQuery(getFolders);
+  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     if (!documents) return [];
@@ -94,6 +96,30 @@ export function DocumentsTable({ folderFilter, className }: DocumentsTableProps)
         description: message,
         variant: "destructive",
       });
+    }
+  };
+
+  const handleDuplicate = async (doc: Document) => {
+    setDuplicatingId(doc.id);
+    try {
+      await duplicateDocument({ documentId: doc.id });
+      toast({
+        title: "Duplicate created",
+        description: `A copy of “${doc.name}” was added with a new PDF in storage.`,
+      });
+      await refetch();
+    } catch (e: unknown) {
+      const message =
+        e && typeof e === "object" && "message" in e
+          ? String((e as { message: string }).message)
+          : "Duplicate failed";
+      toast({
+        title: "Could not duplicate",
+        description: message,
+        variant: "destructive",
+      });
+    } finally {
+      setDuplicatingId(null);
     }
   };
 
@@ -195,6 +221,21 @@ export function DocumentsTable({ folderFilter, className }: DocumentsTableProps)
                         <Eye className="mr-1 h-4 w-4" />
                         View
                       </Link>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={duplicatingId === doc.id}
+                      onClick={() => void handleDuplicate(doc)}
+                      title="Duplicate template (new PDFs in storage)"
+                    >
+                      {duplicatingId === doc.id ? (
+                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Copy className="mr-1 h-4 w-4" />
+                      )}
+                      Duplicate
                     </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>

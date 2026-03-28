@@ -18,6 +18,12 @@ enum DocumentStatus {
   SIGNED
 }
 
+enum PartySigningStatus {
+  NOT_SENT
+  AWAITING_SIGNATURE
+  COMPLETED
+}
+
 enum SignatureFieldType {
   SIGNATURE
   INITIALS
@@ -49,6 +55,7 @@ model User {
   documents                 Document[]
   documentFolders           DocumentFolder[]
   signatureImages           SignatureImage[]
+  userContacts              UserContact[]
 }
 
 /// User-defined folder for organizing document templates (default name: MyFolder).
@@ -76,6 +83,9 @@ model Document {
   /// When the template was first sent for signing (Submissions tab).
   sentAt          DateTime?
 
+  /// If true, signing invites are emailed one party at a time in sortOrder; otherwise all at once.
+  preserveSigningOrder Boolean @default(false)
+
   user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId          String
 
@@ -94,12 +104,37 @@ model DocumentParty {
   sortOrder  Int
   label      String
 
+  /// Display name and email collected when sending for signing (may differ from `label`).
+  signerName  String?
+  signerEmail String?
+
+  /// Opaque token for the public `/sign/:token` page; set when that party is invited.
+  signingToken String? @unique
+
+  signingStatus PartySigningStatus @default(NOT_SENT)
+
   documentId String
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   signatureFields SignatureField[]
 
   @@unique([documentId, sortOrder])
+}
+
+/// Saved signers for autocomplete when sending documents (per owner user).
+model UserContact {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name  String
+  email String
+
+  @@unique([userId, email])
+  @@index([userId])
 }
 
 /// Additional PDFs merged into a document template after the base `Document.fileUrl`.

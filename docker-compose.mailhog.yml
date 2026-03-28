@@ -1,0 +1,17 @@
+# Local SMTP capture for Wasp `emailSender: { provider: SMTP }`.
+# Usage (from repo root):
+#   docker compose -f docker-compose.mailhog.yml up -d
+# Stop:
+#   docker compose -f docker-compose.mailhog.yml down
+#
+# Web UI:  http://localhost:8025
+# SMTP:    localhost:1025  (set in app/.env.server)
+
+services:
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: jurito-mailhog
+    ports:
+      - "1025:1025" # SMTP — point Wasp SMTP_HOST/SMTP_PORT here
+      - "8025:8025" # Web UI — read captured mail in the browser
+    restart: unless-stopped

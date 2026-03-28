@@ -1,5 +1,6 @@
 import {
   DocumentStatus,
+  PartySigningStatus,
   Prisma,
   SignatureFieldType,
   UserPlan,
@@ -13,6 +14,7 @@ import {
   type SignatureField,
   type SignatureImage,
 } from "wasp/entities";
+import { emailSender } from "wasp/server/email";
 import { HttpError, prisma } from "wasp/server";
 import {
   type AddDocumentParty,
@@ -20,10 +22,12 @@ import {
   type CreateDocument,
   type CreateFolder,
   type DeleteDocument,
+  type DuplicateDocument,
   type GetDocumentForEditor,
   type GetDocumentSubmissions,
   type GetDocuments,
   type GetFolders,
+  type GetSigningContacts,
   type MoveDocumentToFolder,
   type RemoveDocumentParty,
   type SaveSignatureImage,
@@ -34,7 +38,7 @@ import {
 import * as z from "zod";
 
 import { ensureArgsSchemaOrThrowHttpError } from "../server/validation";
-import { getPresignedUrl, uploadFile } from "./objectStorage";
+import { downloadObjectBuffer, getPresignedUrl, uploadFile } from "./objectStorage";
 
 const PDF_MAGIC = Buffer.from("%PDF");
 
@@ -672,7 +676,382 @@ function isPngBuffer(buf: Buffer): boolean {
 
 const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024;
 
+function getClientBaseUrl(): string {
+  const raw = process.env.WASP_WEB_CLIENT_URL ?? "http://localhost:3000";
+  return raw.replace(/\/$/, "");
+}
+
+function normalizeContactEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function upsertUserContacts(
+  userId: string,
+  entries: { name: string; email: string }[],
+): Promise<void> {
+  for (const e of entries) {
+    const email = normalizeContactEmail(e.email);
+    const name = e.name.trim();
+    if (!name || !email) continue;
+    await prisma.userContact.upsert({
+      where: {
+        userId_email: { userId, email },
+      },
+      create: {
+        userId,
+        name,
+        email,
+      },
+      update: {
+        name,
+      },
+    });
+  }
+}
+
+async function sendSigningInviteEmail(params: {
+  to: string;
+  signerName: string;
+  documentName: string;
+  signUrl: string;
+}): Promise<void> {
+  const { to, signerName, documentName, signUrl } = params;
+  await emailSender.send({
+    to,
+    subject: `Please sign: ${documentName}`,
+    text: `Hi ${signerName},\n\nPlease review and sign "${documentName}".\n\n${signUrl}\n`,
+    html: `<p>Hi ${escapeHtml(signerName)},</p><p>Please review and sign <strong>${escapeHtml(documentName)}</strong>.</p><p><a href="${escapeHtml(signUrl)}">Open signing page</a></p>`,
+  });
+}
+
+async function maybeMarkDocumentFullySigned(documentId: string): Promise<void> {
+  const pending = await prisma.documentParty.count({
+    where: {
+      documentId,
+      signingStatus: { not: PartySigningStatus.COMPLETED },
+    },
+  });
+  if (pending === 0) {
+    await prisma.document.update({
+      where: { id: documentId },
+      data: { status: DocumentStatus.SIGNED },
+    });
+  }
+}
+
+const sendDocumentInputSchema = z.object({
+  documentId: z.string().uuid(),
+  preserveSigningOrder: z.boolean(),
+  parties: z
+    .array(
+      z.object({
+        partyId: z.string().uuid(),
+        signerName: z.string().min(1).max(200),
+        signerEmail: z.string().email(),
+      }),
+    )
+    .min(1),
+});
+
 export const sendDocument: SendDocument<
+  z.infer<typeof sendDocumentInputSchema>,
+  Document
+> = async (rawArgs, context) => {
+  if (!context.user) {
+    throw new HttpError(401);
+  }
+
+  const args = ensureArgsSchemaOrThrowHttpError(
+    sendDocumentInputSchema,
+    rawArgs,
+  );
+
+  const doc = await context.entities.Document.findFirst({
+    where: { id: args.documentId, userId: context.user.id },
+  });
+
+  if (!doc) {
+    throw new HttpError(404, "Document not found.");
+  }
+
+  if (doc.status !== DocumentStatus.DRAFT) {
+    throw new HttpError(400, "Only draft documents can be sent.");
+  }
+
+  const existingParties = await prisma.documentParty.findMany({
+    where: { documentId: doc.id },
+    orderBy: { sortOrder: "asc" },
+  });
+
+  if (existingParties.length !== args.parties.length) {
+    throw new HttpError(400, "Provide signer details for every party.");
+  }
+
+  const byId = new Map(args.parties.map((p) => [p.partyId, p]));
+  for (const ep of existingParties) {
+    if (!byId.has(ep.id)) {
+      throw new HttpError(400, "Each party must have signer name and email.");
+    }
+  }
+
+  await upsertUserContacts(
+    context.user.id,
+    args.parties.map((p) => ({
+      name: p.signerName,
+      email: normalizeContactEmail(p.signerEmail),
+    })),
+  );
+
+  const baseUrl = getClientBaseUrl();
+
+  if (args.preserveSigningOrder) {
+    const first = existingParties[0]!;
+    const firstPayload = byId.get(first.id)!;
+    const firstToken = randomUUID();
+
+    await prisma.$transaction([
+      prisma.document.update({
+        where: { id: doc.id },
+        data: {
+          status: DocumentStatus.SENT,
+          sentAt: new Date(),
+          preserveSigningOrder: true,
+        },
+      }),
+      ...existingParties.map((ep, idx) => {
+        const row = byId.get(ep.id)!;
+        const email = normalizeContactEmail(row.signerEmail);
+        if (idx === 0) {
+          return prisma.documentParty.update({
+            where: { id: ep.id },
+            data: {
+              signerName: row.signerName.trim(),
+              signerEmail: email,
+              signingToken: firstToken,
+              signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+            },
+          });
+        }
+        return prisma.documentParty.update({
+          where: { id: ep.id },
+          data: {
+            signerName: row.signerName.trim(),
+            signerEmail: email,
+            signingToken: null,
+            signingStatus: PartySigningStatus.NOT_SENT,
+          },
+        });
+      }),
+    ]);
+
+    const signUrl = `${baseUrl}/sign/${firstToken}`;
+    await sendSigningInviteEmail({
+      to: normalizeContactEmail(firstPayload.signerEmail),
+      signerName: firstPayload.signerName.trim(),
+      documentName: doc.name,
+      signUrl,
+    });
+  } else {
+    const tokens = existingParties.map(() => randomUUID());
+
+    await prisma.$transaction([
+      prisma.document.update({
+        where: { id: doc.id },
+        data: {
+          status: DocumentStatus.SENT,
+          sentAt: new Date(),
+          preserveSigningOrder: false,
+        },
+      }),
+      ...existingParties.map((ep, idx) => {
+        const row = byId.get(ep.id)!;
+        const email = normalizeContactEmail(row.signerEmail);
+        return prisma.documentParty.update({
+          where: { id: ep.id },
+          data: {
+            signerName: row.signerName.trim(),
+            signerEmail: email,
+            signingToken: tokens[idx]!,
+            signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+          },
+        });
+      }),
+    ]);
+
+    for (let i = 0; i < existingParties.length; i++) {
+      const ep = existingParties[i]!;
+      const row = byId.get(ep.id)!;
+      const signUrl = `${baseUrl}/sign/${tokens[i]}`;
+      await sendSigningInviteEmail({
+        to: normalizeContactEmail(row.signerEmail),
+        signerName: row.signerName.trim(),
+        documentName: doc.name,
+        signUrl,
+      });
+    }
+  }
+
+  return context.entities.Document.findUniqueOrThrow({
+    where: { id: doc.id },
+  });
+};
+
+export const getSigningContacts: GetSigningContacts<
+  void,
+  { id: string; name: string; email: string }[]
+> = async (_args, context) => {
+  if (!context.user) {
+    throw new HttpError(401);
+  }
+
+  return prisma.userContact.findMany({
+    where: { userId: context.user.id },
+    orderBy: { updatedAt: "desc" },
+    take: 100,
+    select: { id: true, name: true, email: true },
+  });
+};
+
+const signingTokenParamSchema = z.object({
+  token: z.string().min(16),
+});
+
+export type SigningInvitePayload = {
+  documentName: string;
+  partyLabel: string;
+  signerName: string;
+};
+
+/** Used by the public signing HTTP API (no auth). */
+export async function lookupSigningInviteByToken(
+  token: string,
+): Promise<SigningInvitePayload | null> {
+  const parsed = signingTokenParamSchema.safeParse({ token });
+  if (!parsed.success) {
+    return null;
+  }
+
+  const party = await prisma.documentParty.findFirst({
+    where: {
+      signingToken: parsed.data.token,
+      signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+    },
+    include: { document: true },
+  });
+
+  if (!party) {
+    return null;
+  }
+
+  return {
+    documentName: party.document.name,
+    partyLabel: party.label,
+    signerName: party.signerName?.trim() || party.label,
+  };
+}
+
+/** Used by the public signing HTTP API (no auth). */
+export async function finalizePartySigningByToken(
+  token: string,
+): Promise<{ ok: boolean; message: string }> {
+  const parsed = signingTokenParamSchema.safeParse({ token });
+  if (!parsed.success) {
+    throw new HttpError(400, "Invalid signing link.");
+  }
+
+  const party = await prisma.documentParty.findFirst({
+    where: { signingToken: parsed.data.token },
+    include: {
+      document: {
+        include: {
+          parties: { orderBy: { sortOrder: "asc" } },
+        },
+      },
+    },
+  });
+
+  if (!party || party.signingStatus !== PartySigningStatus.AWAITING_SIGNATURE) {
+    throw new HttpError(400, "Invalid or expired signing link.");
+  }
+
+  const documentId = party.documentId;
+  const doc = party.document;
+  const ordered = doc.parties;
+
+  await prisma.documentParty.update({
+    where: { id: party.id },
+    data: {
+      signingStatus: PartySigningStatus.COMPLETED,
+      signingToken: null,
+    },
+  });
+
+  await maybeMarkDocumentFullySigned(documentId);
+
+  if (doc.preserveSigningOrder) {
+    const idx = ordered.findIndex((p) => p.id === party.id);
+    const nextParty = ordered[idx + 1];
+    if (nextParty && nextParty.signingStatus === PartySigningStatus.NOT_SENT) {
+      const newToken = randomUUID();
+      const nextRow = await prisma.documentParty.update({
+        where: { id: nextParty.id },
+        data: {
+          signingToken: newToken,
+          signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+        },
+      });
+      const baseUrl = getClientBaseUrl();
+      const signUrl = `${baseUrl}/sign/${newToken}`;
+      const to = nextRow.signerEmail;
+      const name = nextRow.signerName?.trim() ?? nextParty.label;
+      if (to) {
+        await sendSigningInviteEmail({
+          to: normalizeContactEmail(to),
+          signerName: name,
+          documentName: doc.name,
+          signUrl,
+        });
+      }
+    }
+  }
+
+  return { ok: true, message: "Signing recorded. Thank you." };
+};
+
+function duplicateDocumentDisplayName(original: string): string {
+  const max = 500;
+  const base =
+    original.length > max ? `${original.slice(0, max - 1)}…` : original;
+  if (/\.pdf$/i.test(base)) {
+    return base.replace(/\.pdf$/i, " copy.pdf");
+  }
+  return `${base} (copy)`;
+}
+
+async function copyStoredPdfToNewKey(
+  sourceKey: string,
+  userId: string,
+): Promise<string> {
+  const buf = await downloadObjectBuffer(sourceKey);
+  const ext = path.extname(sourceKey) || ".pdf";
+  const objectKey = `${userId}/${randomUUID()}${ext}`;
+  await uploadFile({
+    objectKey,
+    data: buf,
+    contentType: "application/pdf",
+  });
+  return objectKey;
+}
+
+export const duplicateDocument: DuplicateDocument<
   z.infer<typeof documentIdSchema>,
   Document
 > = async (rawArgs, context) => {
@@ -685,24 +1064,113 @@ export const sendDocument: SendDocument<
     rawArgs,
   );
 
-  const doc = await context.entities.Document.findFirst({
-    where: { id: documentId, userId: context.user.id },
+  const user = await context.entities.User.findUniqueOrThrow({
+    where: { id: context.user.id },
+    select: { plan: true, isAdmin: true },
   });
 
-  if (!doc) {
+  const existingCount = await context.entities.Document.count({
+    where: { userId: context.user.id },
+  });
+
+  const planLimited =
+    !user.isAdmin && user.plan === UserPlan.FREE && existingCount >= 1;
+
+  if (planLimited) {
+    throw new HttpError(
+      403,
+      "Free plan allows one document. Upgrade to Pro to duplicate or add more templates.",
+    );
+  }
+
+  const source = await prisma.document.findFirst({
+    where: { id: documentId, userId: context.user.id },
+    include: {
+      parties: { orderBy: { sortOrder: "asc" } },
+      signatureFields: true,
+      appends: { orderBy: { sortOrder: "asc" } },
+    },
+  });
+
+  if (!source) {
     throw new HttpError(404, "Document not found.");
   }
 
-  if (doc.status !== DocumentStatus.DRAFT) {
-    throw new HttpError(400, "Only draft documents can be sent.");
+  const newName = duplicateDocumentDisplayName(source.name);
+  const userId = context.user.id;
+
+  const newBaseKey = await copyStoredPdfToNewKey(source.fileUrl, userId);
+  const newAppendKeys: string[] = [];
+  for (const a of source.appends) {
+    newAppendKeys.push(await copyStoredPdfToNewKey(a.fileUrl, userId));
   }
 
-  return context.entities.Document.update({
-    where: { id: documentId },
-    data: {
-      status: DocumentStatus.SENT,
-      sentAt: new Date(),
-    },
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.document.create({
+      data: {
+        name: newName,
+        fileUrl: newBaseKey,
+        status: DocumentStatus.DRAFT,
+        sentAt: null,
+        preserveSigningOrder: false,
+        userId,
+        folderId: source.folderId,
+        parties: {
+          create: source.parties.map((p) => ({
+            sortOrder: p.sortOrder,
+            label: p.label,
+            signerName: null,
+            signerEmail: null,
+            signingToken: null,
+            signingStatus: PartySigningStatus.NOT_SENT,
+          })),
+        },
+      },
+      include: {
+        parties: { orderBy: { sortOrder: "asc" } },
+      },
+    });
+
+    const newParties = created.parties;
+    if (newParties.length !== source.parties.length) {
+      throw new HttpError(500, "Duplicate failed: party mismatch.");
+    }
+
+    const partyMap = new Map<string, string>();
+    for (let i = 0; i < source.parties.length; i++) {
+      partyMap.set(source.parties[i]!.id, newParties[i]!.id);
+    }
+
+    for (let i = 0; i < source.appends.length; i++) {
+      await tx.documentAppend.create({
+        data: {
+          documentId: created.id,
+          sortOrder: source.appends[i]!.sortOrder,
+          fileUrl: newAppendKeys[i]!,
+        },
+      });
+    }
+
+    for (const f of source.signatureFields) {
+      const newPartyId = partyMap.get(f.documentPartyId);
+      if (!newPartyId) {
+        throw new HttpError(500, "Duplicate failed: unknown party on field.");
+      }
+      await tx.signatureField.create({
+        data: {
+          type: f.type,
+          xPos: f.xPos,
+          yPos: f.yPos,
+          pageNumber: f.pageNumber,
+          documentId: created.id,
+          documentPartyId: newPartyId,
+        },
+      });
+    }
+
+    return tx.document.findUniqueOrThrow({
+      where: { id: created.id },
+    });
   });
 };
 

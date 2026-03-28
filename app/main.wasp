@@ -91,11 +91,11 @@ app OpenSaaS {
     // NOTE: "Dummy" provider is just for local development purposes.
     //   Make sure to check the server logs for the email confirmation url (it will not be sent to an address)!
     //   Once you are ready for production, switch to e.g. "SendGrid" or "Mailgun" providers. Check out https://docs.opensaas.sh/guides/email-sending/ .
-    provider: Dummy,
+    provider: SMTP,
     defaultFrom: {
-      name: "Open SaaS App",
+      name: "Jurito App",
       // When using a real provider, e.g. SendGrid, you must use the same email address that you configured your account to send out emails with!
-      email: "me@example.com"
+      email: "info@getjurito.com"
     },
   },
 }
@@ -169,6 +169,12 @@ page DocumentPreviewPage {
   component: import DocumentPreviewPage from "@src/documents/DocumentPreviewPage"
 }
 
+route SignDocumentRoute { path: "/sign/:token", to: SignDocumentPage }
+page SignDocumentPage {
+  authRequired: false,
+  component: import SignDocumentPage from "@src/documents/SignDocumentPage"
+}
+
 query getDocuments {
   fn: import { getDocuments } from "@src/documents/operations",
   entities: [User, Document, DocumentFolder]
@@ -189,6 +195,27 @@ query getDocumentForEditor {
   entities: [User, Document, SignatureField, DocumentAppend, DocumentParty]
 }
 
+query getSigningContacts {
+  fn: import { getSigningContacts } from "@src/documents/operations",
+  entities: [User, UserContact]
+}
+
+api getSigningInviteApi {
+  fn: import { getSigningInviteHttp } from "@src/documents/signingApi",
+  entities: [Document, DocumentParty],
+  httpRoute: (GET, "/signing-invite/:token"),
+  auth: false,
+  middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
+}
+
+api completePartySigningApi {
+  fn: import { completePartySigningHttp } from "@src/documents/signingApi",
+  entities: [Document, DocumentParty],
+  httpRoute: (POST, "/signing-complete/:token"),
+  auth: false,
+  middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
+}
+
 action appendPdfToTemplate {
   fn: import { appendPdfToTemplate } from "@src/documents/operations",
   entities: [User, Document, DocumentAppend]
@@ -207,6 +234,11 @@ action removeDocumentParty {
 action createDocument {
   fn: import { createDocument } from "@src/documents/operations",
   entities: [User, Document, DocumentParty, DocumentFolder]
+}
+
+action duplicateDocument {
+  fn: import { duplicateDocument } from "@src/documents/operations",
+  entities: [User, Document, DocumentFolder, DocumentParty, SignatureField, DocumentAppend]
 }
 
 action createFolder {
@@ -236,7 +268,7 @@ action saveSignatureImage {
 
 action sendDocument {
   fn: import { sendDocument } from "@src/documents/operations",
-  entities: [User, Document]
+  entities: [User, Document, DocumentParty, UserContact]
 }
 
 action deleteDocument {
