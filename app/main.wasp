@@ -208,10 +208,11 @@ api getSigningInviteApi {
   middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
 }
 
+//! ALL (not POST): browsers send OPTIONS preflight; `router.post` does not match OPTIONS, so CORS never ran.
 api completePartySigningApi {
   fn: import { completePartySigningHttp } from "@src/documents/signingApi",
   entities: [Document, DocumentParty, SignatureField, SignatureFieldCompletion],
-  httpRoute: (POST, "/signing-complete/:token"),
+  httpRoute: (ALL, "/signing-complete/:token"),
   auth: false,
   middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
 }
@@ -219,7 +220,7 @@ api completePartySigningApi {
 api rejectPartySigningApi {
   fn: import { rejectPartySigningHttp } from "@src/documents/signingApi",
   entities: [Document, DocumentParty],
-  httpRoute: (POST, "/signing-reject/:token"),
+  httpRoute: (ALL, "/signing-reject/:token"),
   auth: false,
   middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
 }

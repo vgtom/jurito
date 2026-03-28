@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import SignatureCanvas from "react-signature-canvas";
 
 import { Button } from "../../client/components/ui/button";
@@ -20,6 +20,8 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   title?: string;
   onApply: (pngDataUrl: string) => void;
+  /** Live preview on the document placeholder while drawing or typing (before Apply). */
+  onPreview?: (pngDataUrl: string | null) => void;
 };
 
 function textToPngDataUrl(text: string): string {
@@ -30,12 +32,12 @@ function textToPngDataUrl(text: string): string {
   if (!ctx) return "";
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#0a0a0a";
+  ctx.fillStyle = "#14532d";
   ctx.font =
-    '52px "Segoe Script", "Brush Script MT", "Snell Roundhand", cursive';
+    'italic 56px "Segoe Script", "Brush Script MT", "Snell Roundhand", "Apple Chancery", "Lucida Handwriting", cursive';
   ctx.textBaseline = "middle";
   const t = text.trim() || " ";
-  ctx.fillText(t, 24, canvas.height / 2);
+  ctx.fillText(t, 28, canvas.height / 2);
   return canvas.toDataURL("image/png");
 }
 
@@ -44,16 +46,56 @@ export function SignatureCaptureModal({
   onOpenChange,
   title = "Add signature",
   onApply,
+  onPreview,
 }: Props) {
   const [tab, setTab] = useState<Tab>("draw");
   const [typed, setTyped] = useState("");
   const sigRef = useRef<SignatureCanvas>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const applyDraw = () => {
-    if (!sigRef.current || sigRef.current.isEmpty()) return;
+  const pushDrawPreview = () => {
+    if (!onPreview) return;
+    if (!sigRef.current || sigRef.current.isEmpty()) {
+      onPreview(null);
+      return;
+    }
     const trimmed = sigRef.current.getTrimmedCanvas();
-    onApply(trimmed.toDataURL("image/png"));
+    onPreview(trimmed.toDataURL("image/png"));
+  };
+
+  useEffect(() => {
+    if (!open) {
+      onPreview?.(null);
+      return;
+    }
+    if (tab === "type") {
+      const t = typed.trim();
+      if (!t) {
+        onPreview?.(null);
+        return;
+      }
+      const id = window.setTimeout(() => {
+        onPreview?.(textToPngDataUrl(typed));
+      }, 120);
+      return () => window.clearTimeout(id);
+    }
+  }, [open, tab, typed, onPreview]);
+
+  const applyDraw = () => {
+    if (!sigRef.current) return;
+    if (sigRef.current.isEmpty()) return;
+    let dataUrl: string;
+    try {
+      const trimmed = sigRef.current.getTrimmedCanvas();
+      dataUrl = trimmed.toDataURL("image/png");
+      if (!trimmed.width || !trimmed.height) {
+        dataUrl = sigRef.current.toDataURL("image/png");
+      }
+    } catch {
+      dataUrl = sigRef.current.toDataURL("image/png");
+    }
+    onApply(dataUrl);
+    onPreview?.(null);
     onOpenChange(false);
     sigRef.current.clear();
   };
@@ -62,6 +104,7 @@ export function SignatureCaptureModal({
     const url = textToPngDataUrl(typed);
     if (!url) return;
     onApply(url);
+    onPreview?.(null);
     onOpenChange(false);
     setTyped("");
   };
@@ -88,7 +131,9 @@ export function SignatureCaptureModal({
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0, w, h);
-        onApply(canvas.toDataURL("image/png"));
+        const url = canvas.toDataURL("image/png");
+        onPreview?.(null);
+        onApply(url);
         onOpenChange(false);
       };
       img.src = reader.result as string;
@@ -130,10 +175,19 @@ export function SignatureCaptureModal({
         {tab === "draw" && (
           <div className="space-y-2">
             <div className="bg-muted/50 rounded-md border">
+              {/*
+                clearOnResize + implicit resize clears the pad when the dialog
+                opens or the window resizes, so Apply often saw an empty canvas.
+                Fixed width/height skip internal resize/clear (see react-signature-canvas).
+              */}
               <SignatureCanvas
                 ref={sigRef}
+                clearOnResize={false}
+                onEnd={pushDrawPreview}
                 canvasProps={{
                   className: "w-full touch-none rounded-md",
+                  width: 700,
+                  height: 280,
                   style: { height: 180, width: "100%" },
                 }}
               />
@@ -142,7 +196,10 @@ export function SignatureCaptureModal({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => sigRef.current?.clear()}
+              onClick={() => {
+                sigRef.current?.clear();
+                onPreview?.(null);
+              }}
             >
               Clear
             </Button>

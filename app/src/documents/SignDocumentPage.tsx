@@ -115,6 +115,36 @@ function isSigningFieldFilled(
   return !!(t && t.trim());
 }
 
+/** Downscale PNG data URLs so POST bodies stay small (avoids 413 / timeouts). */
+function compressPngDataUrl(dataUrl: string, maxWidth = 520): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/png"));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 function hintLabelForFieldType(type: string): string {
   switch (type) {
     case "SIGNATURE":
@@ -163,6 +193,8 @@ function SignFieldOverlay({
   currentIndex,
   values,
   serverByFieldId,
+  livePreview,
+  fieldGuideDismissed,
   onFieldClick,
 }: {
   pageIndex: number;
@@ -173,6 +205,8 @@ function SignFieldOverlay({
   currentIndex: number;
   values: Record<string, { text?: string; imageDataUrl?: string }>;
   serverByFieldId: Record<string, { text?: string; imageUrl?: string }>;
+  livePreview: { fieldId: string; dataUrl: string } | null;
+  fieldGuideDismissed: Record<string, boolean>;
   onFieldClick: (f: SigningFieldPayload) => void;
 }) {
   const pageNum = pageIndex + 1;
@@ -190,13 +224,16 @@ function SignFieldOverlay({
           const isFuture = stepIndex > currentIndex;
           const v = values[f.id];
           const s = serverByFieldId[f.id];
-          const imageSrc = v?.imageDataUrl ?? s?.imageUrl;
+          const previewUrl =
+            livePreview?.fieldId === f.id ? livePreview.dataUrl : undefined;
+          const imageSrc = v?.imageDataUrl ?? s?.imageUrl ?? previewUrl;
           const text = v?.text ?? s?.text;
           const hasImg = !!imageSrc;
           const hasText = !!(text && text.trim());
           const showHint =
             isCurrent &&
-            !isSigningFieldFilled(f, values, serverByFieldId);
+            !previewUrl &&
+            !fieldGuideDismissed[f.id];
 
           return (
             <div
@@ -270,6 +307,8 @@ function SignPdfPartBlock({
   currentIndex,
   values,
   serverByFieldId,
+  livePreview,
+  fieldGuideDismissed,
   onFieldClick,
   onPdfPartError,
 }: {
@@ -286,6 +325,8 @@ function SignPdfPartBlock({
   currentIndex: number;
   values: Record<string, { text?: string; imageDataUrl?: string }>;
   serverByFieldId: Record<string, { text?: string; imageUrl?: string }>;
+  livePreview: { fieldId: string; dataUrl: string } | null;
+  fieldGuideDismissed: Record<string, boolean>;
   onFieldClick: (f: SigningFieldPayload) => void;
   onPdfPartError: (message: string) => void;
 }) {
@@ -341,6 +382,8 @@ function SignPdfPartBlock({
                   currentIndex={currentIndex}
                   values={values}
                   serverByFieldId={serverByFieldId}
+                  livePreview={livePreview}
+                  fieldGuideDismissed={fieldGuideDismissed}
                   onFieldClick={onFieldClick}
                 />
               )}
@@ -376,6 +419,15 @@ export default function SignDocumentPage() {
   const [sigModalOpen, setSigModalOpen] = useState(false);
   const [sigModalField, setSigModalField] =
     useState<SigningFieldPayload | null>(null);
+  /** Live signature/image while the modal is open (stroke or typed preview). */
+  const [signatureLivePreview, setSignatureLivePreview] = useState<{
+    fieldId: string;
+    dataUrl: string;
+  } | null>(null);
+  /** Hides the amber "Click to …" guide after the user interacts with that field once. */
+  const [fieldGuideDismissed, setFieldGuideDismissed] = useState<
+    Record<string, boolean>
+  >({});
   const [declined, setDeclined] = useState(false);
   const [rejecting, setRejecting] = useState(false);
 
@@ -465,7 +517,8 @@ export default function SignDocumentPage() {
     setPdfError(null);
     pageWrapRefs.current = [];
     setCurrentIndex(0);
-  }, [invite?.documentId, partsKey]);
+    setFieldGuideDismissed({});
+  }, [token, invite?.documentId, partsKey]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -492,6 +545,7 @@ export default function SignDocumentPage() {
       if (!invite) return;
       const idx = myFields.findIndex((x) => x.id === f.id);
       if (idx !== currentIndex) return;
+      setFieldGuideDismissed((prev) => ({ ...prev, [f.id]: true }));
       if (f.type === "INITIALS") {
         const ini = deriveInitials(invite.signerName);
         setValues((prev) => ({
@@ -502,6 +556,7 @@ export default function SignDocumentPage() {
         return;
       }
       if (fieldUsesImageModal(f.type)) {
+        setSignatureLivePreview(null);
         setSigModalField(f);
         setSigModalOpen(true);
         return;
@@ -515,14 +570,31 @@ export default function SignDocumentPage() {
     [invite, myFields, currentIndex],
   );
 
+  const handleSignatureModalPreview = useCallback(
+    (url: string | null) => {
+      if (!sigModalField) {
+        setSignatureLivePreview(null);
+        return;
+      }
+      if (!url) {
+        setSignatureLivePreview(null);
+        return;
+      }
+      setSignatureLivePreview({ fieldId: sigModalField.id, dataUrl: url });
+    },
+    [sigModalField],
+  );
+
   const applySignatureFromModal = useCallback(
-    (pngDataUrl: string) => {
+    async (pngDataUrl: string) => {
       if (!sigModalField) return;
+      const compressed = await compressPngDataUrl(pngDataUrl);
+      setSignatureLivePreview(null);
       setValues((prev) => ({
         ...prev,
         [sigModalField.id]: {
           ...prev[sigModalField.id],
-          imageDataUrl: pngDataUrl,
+          imageDataUrl: compressed,
         },
       }));
       setSigModalField(null);
@@ -635,17 +707,37 @@ export default function SignDocumentPage() {
           body: JSON.stringify({ completions }),
         },
       );
-      const body = (await res.json()) as { message?: string };
+      const raw = await res.text();
+      let body: { message?: string } = {};
+      if (raw) {
+        try {
+          body = JSON.parse(raw) as { message?: string };
+        } catch {
+          throw new Error(
+            raw.length > 180 ? `${raw.slice(0, 180)}…` : raw || `HTTP ${res.status}`,
+          );
+        }
+      }
       if (!res.ok) {
-        throw new Error(body.message ?? "Could not complete signing");
+        throw new Error(
+          body.message ??
+            (res.status === 413
+              ? "Request too large. Try a smaller signature or refresh the page."
+              : `Could not complete signing (${res.status})`),
+        );
       }
       toast({
         title: "Done",
         description: body.message ?? "Thank you — your signing is recorded.",
       });
     } catch (e: unknown) {
-      const message =
-        e instanceof Error ? e.message : "Could not complete signing";
+      let message = "Could not complete signing";
+      if (e instanceof TypeError && e.message === "Failed to fetch") {
+        message =
+          "Network error: could not reach the server. Check that the app is running and REACT_APP_API_URL matches your API (same host/port as in dev).";
+      } else if (e instanceof Error) {
+        message = e.message;
+      }
       toast({
         title: "Error",
         description: message,
@@ -819,6 +911,8 @@ export default function SignDocumentPage() {
                   currentIndex={currentIndex}
                   values={values}
                   serverByFieldId={serverByFieldId}
+                  livePreview={signatureLivePreview}
+                  fieldGuideDismissed={fieldGuideDismissed}
                   onFieldClick={handleFieldClick}
                   onPdfPartError={setPdfError}
                 />
@@ -912,11 +1006,21 @@ export default function SignDocumentPage() {
                     <div
                       className="border-border bg-muted/30 flex min-h-[120px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-3"
                       onClick={() => {
+                        setSignatureLivePreview(null);
+                        setFieldGuideDismissed((p) => ({
+                          ...p,
+                          [currentField.id]: true,
+                        }));
                         setSigModalField(currentField);
                         setSigModalOpen(true);
                       }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
+                          setSignatureLivePreview(null);
+                          setFieldGuideDismissed((p) => ({
+                            ...p,
+                            [currentField.id]: true,
+                          }));
                           setSigModalField(currentField);
                           setSigModalOpen(true);
                         }
@@ -925,11 +1029,13 @@ export default function SignDocumentPage() {
                       tabIndex={0}
                     >
                       {values[currentField.id]?.imageDataUrl ||
-                      serverByFieldId[currentField.id]?.imageUrl ? (
+                      serverByFieldId[currentField.id]?.imageUrl ||
+                      signatureLivePreview?.fieldId === currentField.id ? (
                         <img
                           src={
                             values[currentField.id]?.imageDataUrl ??
-                            serverByFieldId[currentField.id]!.imageUrl
+                            serverByFieldId[currentField.id]?.imageUrl ??
+                            signatureLivePreview?.dataUrl
                           }
                           alt="Signature"
                           className="max-h-28 w-full object-contain"
@@ -982,14 +1088,18 @@ export default function SignDocumentPage() {
         open={sigModalOpen}
         onOpenChange={(open) => {
           setSigModalOpen(open);
-          if (!open) setSigModalField(null);
+          if (!open) {
+            setSigModalField(null);
+            setSignatureLivePreview(null);
+          }
         }}
         title={
           sigModalField
             ? `Add ${fieldTypeTitle(sigModalField.type).toLowerCase()}`
             : "Add signature"
         }
-        onApply={applySignatureFromModal}
+        onPreview={handleSignatureModalPreview}
+        onApply={(dataUrl) => void applySignatureFromModal(dataUrl)}
       />
     </div>
   );

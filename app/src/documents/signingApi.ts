@@ -1,3 +1,4 @@
+import cors from "cors";
 import type { Request, Response } from "express";
 import type { MiddlewareConfigFn } from "wasp/server";
 import { HttpError } from "wasp/server";
@@ -8,8 +9,30 @@ import {
   rejectSigningByToken,
 } from "./operations";
 
-export const signingApiMiddleware: MiddlewareConfigFn = (middlewareConfig) =>
-  middlewareConfig;
+/**
+ * Public signing routes are called from the SPA on a different origin (Vite dev
+ * client → Wasp server, or www vs api in prod). Default Wasp CORS only allows
+ * `WASP_WEB_CLIENT_URL` in production, so localhost vs 127.0.0.1 mismatches
+ * break preflight. These handlers are unauthenticated (token in path); allow
+ * any origin with reflected `Access-Control-Allow-Origin`.
+ */
+export const signingCors = cors({
+  origin: true,
+  credentials: true,
+  methods: ["GET", "HEAD", "POST", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+  ],
+  maxAge: 86400,
+});
+
+export const signingApiMiddleware: MiddlewareConfigFn = (middlewareConfig) => {
+  middlewareConfig.set("cors", signingCors);
+  return middlewareConfig;
+};
 
 /** Wasp passes `context` as the third argument to API handlers (entities injection). */
 type SigningApiContext = {
@@ -43,6 +66,15 @@ export async function rejectPartySigningHttp(
   res: Response,
   _context: SigningApiContext,
 ): Promise<void> {
+  if (req.method === "OPTIONS") {
+    signingCors(req, res, () => undefined);
+    return;
+  }
+  if (req.method !== "POST") {
+    res.status(405).set("Allow", "POST, OPTIONS").json({ message: "Method not allowed." });
+    return;
+  }
+
   const token = req.params["token"];
   if (typeof token !== "string" || token.length < 16) {
     res.status(400).json({ message: "Invalid token." });
@@ -66,6 +98,15 @@ export async function completePartySigningHttp(
   res: Response,
   _context: SigningApiContext,
 ): Promise<void> {
+  if (req.method === "OPTIONS") {
+    signingCors(req, res, () => undefined);
+    return;
+  }
+  if (req.method !== "POST") {
+    res.status(405).set("Allow", "POST, OPTIONS").json({ message: "Method not allowed." });
+    return;
+  }
+
   const token = req.params["token"];
   if (typeof token !== "string" || token.length < 16) {
     res.status(400).json({ message: "Invalid token." });
