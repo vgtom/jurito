@@ -22,6 +22,7 @@ enum PartySigningStatus {
   NOT_SENT
   AWAITING_SIGNATURE
   COMPLETED
+  REJECTED
 }
 
 enum SignatureFieldType {
@@ -113,10 +114,18 @@ model DocumentParty {
 
   signingStatus PartySigningStatus @default(NOT_SENT)
 
+  /// When the signing invite email was sent for this party (invite link active).
+  inviteSentAt DateTime?
+  /// First time the signer opened the signing page with a valid token.
+  signingViewedAt DateTime?
+  /// When the signer declined to sign (public reject flow).
+  rejectedAt DateTime?
+
   documentId String
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   signatureFields SignatureField[]
+  signatureFieldCompletions SignatureFieldCompletion[]
 
   @@unique([documentId, sortOrder])
 }
@@ -158,11 +167,35 @@ model SignatureField {
   yPos       Float
   pageNumber Int
 
+  /// Order fields were placed for this party (0 = first); signing follows this order.
+  placementOrder Int @default(0)
+
   document   Document           @relation(fields: [documentId], references: [id], onDelete: Cascade)
   documentId String
 
   documentParty   DocumentParty @relation(fields: [documentPartyId], references: [id], onDelete: Cascade)
   documentPartyId String
+
+  completions SignatureFieldCompletion[]
+}
+
+/// Values a signer submitted for a template field (public signing flow).
+model SignatureFieldCompletion {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  signatureFieldId String
+  signatureField   SignatureField @relation(fields: [signatureFieldId], references: [id], onDelete: Cascade)
+
+  documentPartyId String
+  documentParty   DocumentParty @relation(fields: [documentPartyId], references: [id], onDelete: Cascade)
+
+  /// TEXT / DATE, or typed initials as text.
+  textValue String?
+  /// S3 object key for drawn, typed-as-image, or uploaded signature images.
+  imageObjectKey String?
+
+  @@unique([signatureFieldId, documentPartyId])
 }
 
 model SignatureImage {

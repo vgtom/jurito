@@ -1,4 +1,3 @@
-import { type Document } from "wasp/entities";
 import { getDocumentSubmissions, useQuery } from "wasp/client/operations";
 import { Link, routes } from "wasp/client/router";
 import { Eye, Loader2 } from "lucide-react";
@@ -15,7 +14,7 @@ import {
 } from "../client/components/ui/table";
 
 function statusBadgeVariant(
-  status: Document["status"],
+  status: "DRAFT" | "SENT" | "SIGNED",
 ): "secondary" | "default" | "success" {
   switch (status) {
     case "DRAFT":
@@ -61,7 +60,9 @@ export function SubmissionsTable() {
           <TableHeader className="bg-background/95 sticky top-0 z-10 backdrop-blur-sm [&_tr]:border-b">
             <TableRow className="border-border/80 hover:bg-transparent">
               <TableHead className="whitespace-nowrap">Document</TableHead>
-              <TableHead className="whitespace-nowrap">Status</TableHead>
+              <TableHead className="min-w-[280px] whitespace-nowrap">
+                Signing progress
+              </TableHead>
               <TableHead className="whitespace-nowrap">Sent</TableHead>
               <TableHead className="text-right whitespace-nowrap">
                 Actions
@@ -96,10 +97,24 @@ export function SubmissionsTable() {
                   <TableCell className="max-w-[240px] truncate py-2.5 font-medium">
                     {doc.name}
                   </TableCell>
-                  <TableCell className="py-2.5">
-                    <Badge variant={statusBadgeVariant(doc.status)}>
-                      {doc.status.toLowerCase()}
-                    </Badge>
+                  <TableCell className="max-w-xl py-2.5 align-top">
+                    <div className="flex flex-col gap-2">
+                      <Badge
+                        variant={statusBadgeVariant(doc.status)}
+                        className="w-fit capitalize"
+                      >
+                        {doc.status.toLowerCase()}
+                      </Badge>
+                      {doc.parties.length === 0 ? (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      ) : (
+                        <ul className="text-muted-foreground space-y-1 text-xs leading-snug">
+                          {doc.parties.map((p) => (
+                            <li key={p.id}>{p.statusSummary}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="text-muted-foreground whitespace-nowrap py-2.5">
                     {formatDate(doc.sentAt ?? doc.createdAt)}

@@ -187,7 +187,7 @@ query getFolders {
 
 query getDocumentSubmissions {
   fn: import { getDocumentSubmissions } from "@src/documents/operations",
-  entities: [User, Document]
+  entities: [User, Document, DocumentParty]
 }
 
 query getDocumentForEditor {
@@ -202,7 +202,7 @@ query getSigningContacts {
 
 api getSigningInviteApi {
   fn: import { getSigningInviteHttp } from "@src/documents/signingApi",
-  entities: [Document, DocumentParty],
+  entities: [Document, DocumentParty, DocumentAppend, SignatureField, SignatureFieldCompletion, User],
   httpRoute: (GET, "/signing-invite/:token"),
   auth: false,
   middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
@@ -210,8 +210,16 @@ api getSigningInviteApi {
 
 api completePartySigningApi {
   fn: import { completePartySigningHttp } from "@src/documents/signingApi",
-  entities: [Document, DocumentParty],
+  entities: [Document, DocumentParty, SignatureField, SignatureFieldCompletion],
   httpRoute: (POST, "/signing-complete/:token"),
+  auth: false,
+  middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
+}
+
+api rejectPartySigningApi {
+  fn: import { rejectPartySigningHttp } from "@src/documents/signingApi",
+  entities: [Document, DocumentParty],
+  httpRoute: (POST, "/signing-reject/:token"),
   auth: false,
   middlewareConfigFn: import { signingApiMiddleware } from "@src/documents/signingApi"
 }

@@ -61,6 +61,13 @@ import {
 } from "../client/components/ui/dialog";
 import { Input } from "../client/components/ui/input";
 import { Label } from "../client/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../client/components/ui/select";
 import { toast } from "../client/hooks/use-toast";
 import { cn } from "../client/utils";
 /** Mirrors server `PdfPart` from `getDocumentForEditor` — keep in sync. */
@@ -93,7 +100,7 @@ function fieldTypeTitle(t: SignatureFieldTypeValue): string {
 }
 
 function fieldRowLabel(f: EditorField): string {
-  return `${fieldTypeTitle(f.type)} · page ${f.page}`;
+  return `${fieldTypeTitle(f.type)} · #${f.placementOrder + 1} · page ${f.page}`;
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -117,6 +124,8 @@ export type EditorField = {
   yNorm: number;
   /** 1-based global page index across base + appends */
   page: number;
+  /** Order this field was placed for its party (signing follows this order). */
+  placementOrder: number;
   documentPartyId: string;
   /** Shown on fields when document is sent (all parties visible). */
   partyLabel?: string;
@@ -375,6 +384,8 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   const [signerByPartyId, setSignerByPartyId] = useState<
     Record<string, { name: string; email: string }>
   >({});
+  /** Preview mode: which party’s fields are shown on the PDF (dropdown). */
+  const [previewPartyId, setPreviewPartyId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const pageWrapRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -415,6 +426,14 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   }, [parts, partPageCounts, currentPage]);
 
   const parties = data?.parties ?? [];
+
+  useEffect(() => {
+    if (!isPreview || parties.length === 0) return;
+    setPreviewPartyId((prev) => {
+      if (prev && parties.some((p) => p.id === prev)) return prev;
+      return parties[0]!.id;
+    });
+  }, [isPreview, data?.document.id, parties]);
 
   const openSendModal = () => {
     if (!parties.length) {
@@ -492,10 +511,14 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   };
 
   const fieldsForOverlay = useMemo(() => {
-    if (isPreview || !isDraft) return localFields;
+    if (isPreview) {
+      if (!previewPartyId) return [];
+      return localFields.filter((f) => f.documentPartyId === previewPartyId);
+    }
+    if (!isDraft) return localFields;
     if (!selectedPartyId) return [];
     return localFields.filter((f) => f.documentPartyId === selectedPartyId);
-  }, [isPreview, isDraft, localFields, selectedPartyId]);
+  }, [isPreview, isDraft, localFields, selectedPartyId, previewPartyId]);
 
   const overlayReadOnly = isPreview || !isDraft;
 
@@ -532,6 +555,7 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
         xNorm: f.xPos,
         yNorm: f.yPos,
         page: f.pageNumber,
+        placementOrder: f.placementOrder ?? 0,
         documentPartyId: f.documentPartyId,
         partyLabel: labelByPartyId[f.documentPartyId],
       }));
@@ -664,18 +688,26 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
     if (!partyId) return;
     const partyLabel = parties.find((p) => p.id === partyId)?.label;
     const key = crypto.randomUUID();
-    setLocalFields((prev) => [
-      ...prev,
-      {
-        key,
-        type,
-        xNorm: 0.2,
-        yNorm: 0.2,
-        page: currentPage + 1,
-        documentPartyId: partyId,
-        partyLabel,
-      },
-    ]);
+    setLocalFields((prev) => {
+      const forParty = prev.filter((f) => f.documentPartyId === partyId);
+      const nextOrder =
+        forParty.length === 0
+          ? 0
+          : Math.max(...forParty.map((f) => f.placementOrder)) + 1;
+      return [
+        ...prev,
+        {
+          key,
+          type,
+          xNorm: 0.2,
+          yNorm: 0.2,
+          page: currentPage + 1,
+          placementOrder: nextOrder,
+          documentPartyId: partyId,
+          partyLabel,
+        },
+      ];
+    });
   };
 
   const handleAddParty = async () => {
@@ -712,6 +744,7 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
           y: f.yNorm,
           page: f.page,
           documentPartyId: f.documentPartyId,
+          placementOrder: f.placementOrder,
         })),
       });
       toast({ title: "Placements saved" });
@@ -756,7 +789,12 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
     (partyId: string) =>
       [...localFields]
         .filter((f) => f.documentPartyId === partyId)
-        .sort((a, b) => a.page - b.page || a.key.localeCompare(b.key)),
+        .sort(
+          (a, b) =>
+            a.placementOrder - b.placementOrder ||
+            a.page - b.page ||
+            a.key.localeCompare(b.key),
+        ),
     [localFields],
   );
 
@@ -895,7 +933,8 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
   return (
     <div className="bg-muted/45 flex h-[calc(100dvh-3.5rem)] min-h-0 flex-col overflow-hidden">
       <div className="mx-auto box-border flex min-h-0 w-full max-w-[1920px] flex-1 flex-col px-4 pb-3 pt-2 sm:px-6 lg:px-10">
-      <header className="border-border mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 shadow-sm">
+      <header className="border-border mb-3 flex shrink-0 flex-col gap-3 rounded-xl border bg-card px-4 py-3 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
         <nav
           className="text-muted-foreground flex min-w-0 max-w-[55%] items-center gap-1.5 text-sm"
           aria-label="Breadcrumb"
@@ -936,9 +975,9 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
             {totalPages > 0 ? ` / ${totalPages}` : ""}
           </span>
           {isPreview ? (
-            <Button type="button" size="sm" variant="secondary" asChild>
+            <Button type="button" size="sm" variant="default" asChild>
               <Link to={routes.DocumentEditorRoute.to} params={{ documentId }}>
-                Edit
+                Exit preview
               </Link>
             </Button>
           ) : null}
@@ -988,6 +1027,36 @@ export function DocumentWorkspace({ mode }: { mode: "edit" | "preview" }) {
             </>
           )}
         </div>
+        </div>
+        {isPreview && parties.length > 0 ? (
+          <div className="border-border flex flex-col gap-2 border-t pt-3 sm:flex-row sm:items-center sm:gap-4">
+            <Label
+              htmlFor="preview-party-select"
+              className="text-muted-foreground shrink-0 text-sm font-medium"
+            >
+              Preview fields for
+            </Label>
+            <Select
+              value={previewPartyId ?? ""}
+              onValueChange={(v) => setPreviewPartyId(v)}
+            >
+              <SelectTrigger id="preview-party-select" className="w-full sm:max-w-xs">
+                <SelectValue placeholder="Choose a party" />
+              </SelectTrigger>
+              <SelectContent>
+                {parties.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground text-xs sm:ml-auto sm:max-w-md">
+              Only this party&apos;s field placeholders are shown, as signers
+              will see for their role.
+            </p>
+          </div>
+        ) : null}
       </header>
 
       <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-hidden">

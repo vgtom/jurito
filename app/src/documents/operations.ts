@@ -192,21 +192,93 @@ export const getFolders: GetFolders<void, DocumentFolder[]> = async (
   });
 };
 
+/** Submissions tab: per-party line for signing pipeline (email → open → sign / decline). */
+export type DocumentSubmissionPartyRow = {
+  id: string;
+  label: string;
+  sortOrder: number;
+  signingStatus: PartySigningStatus;
+  statusSummary: string;
+};
+
+export type DocumentSubmissionRow = {
+  id: string;
+  name: string;
+  status: DocumentStatus;
+  sentAt: Date | null;
+  createdAt: Date;
+  preserveSigningOrder: boolean;
+  parties: DocumentSubmissionPartyRow[];
+};
+
+function buildSubmissionPartySummary(
+  p: {
+    label: string;
+    signingStatus: PartySigningStatus;
+    inviteSentAt: Date | null;
+    signingViewedAt: Date | null;
+    rejectedAt: Date | null;
+  },
+  ctx: { preserveSigningOrder: boolean },
+): string {
+  const label = p.label.trim() || "Signer";
+  if (p.signingStatus === PartySigningStatus.REJECTED || p.rejectedAt) {
+    return `${label}: Declined to sign`;
+  }
+  if (p.signingStatus === PartySigningStatus.COMPLETED) {
+    return `${label}: Signed`;
+  }
+  if (p.signingStatus === PartySigningStatus.NOT_SENT) {
+    if (ctx.preserveSigningOrder) {
+      return `${label}: Waiting for previous signers`;
+    }
+    return `${label}: Not invited`;
+  }
+  if (!p.inviteSentAt) {
+    return `${label}: Awaiting signature`;
+  }
+  if (!p.signingViewedAt) {
+    return `${label}: Email sent — link not opened yet`;
+  }
+  return `${label}: Opened — awaiting signature`;
+}
+
 export const getDocumentSubmissions: GetDocumentSubmissions<
   void,
-  Document[]
+  DocumentSubmissionRow[]
 > = async (_args, context) => {
   if (!context.user) {
     throw new HttpError(401);
   }
 
-  return prisma.document.findMany({
+  const docs = await prisma.document.findMany({
     where: {
       userId: context.user.id,
       status: { in: [DocumentStatus.SENT, DocumentStatus.SIGNED] },
     },
     orderBy: [{ sentAt: "desc" }, { createdAt: "desc" }],
+    include: {
+      parties: { orderBy: { sortOrder: "asc" } },
+    },
   });
+
+  return docs.map((doc) => ({
+    id: doc.id,
+    name: doc.name,
+    status: doc.status,
+    sentAt: doc.sentAt,
+    createdAt: doc.createdAt,
+    preserveSigningOrder: doc.preserveSigningOrder,
+    parties: doc.parties.map((p) => ({
+      id: p.id,
+      label: p.label,
+      sortOrder: p.sortOrder,
+      signingStatus: p.signingStatus,
+      statusSummary: buildSubmissionPartySummary(p, {
+        preserveSigningOrder: doc.preserveSigningOrder,
+      }),
+    })),
+  }));
 };
 
 const createFolderInputSchema = z.object({
@@ -326,7 +398,7 @@ export const getDocumentForEditor: GetDocumentForEditor<
 
   const fields = await context.entities.SignatureField.findMany({
     where: { documentId: document.id },
-    orderBy: { pageNumber: "asc" },
+    orderBy: [{ documentPartyId: "asc" }, { placementOrder: "asc" }, { pageNumber: "asc" }],
   });
 
   const appends = await prisma.documentAppend.findMany({
@@ -600,6 +672,7 @@ const saveFieldInputSchema = z.object({
       y: z.number(),
       page: z.number().int().min(1),
       documentPartyId: z.string().uuid(),
+      placementOrder: z.number().int().min(0),
     }),
   ),
 });
@@ -653,6 +726,7 @@ export const saveFields: SaveFields<SaveFieldInput, { count: number }> = async (
         xPos: f.x,
         yPos: f.y,
         pageNumber: f.page,
+        placementOrder: f.placementOrder,
         documentId: doc.id,
         documentPartyId: f.documentPartyId,
       })),
@@ -837,6 +911,7 @@ export const sendDocument: SendDocument<
               signerEmail: email,
               signingToken: firstToken,
               signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+              inviteSentAt: new Date(),
             },
           });
         }
@@ -847,6 +922,9 @@ export const sendDocument: SendDocument<
             signerEmail: email,
             signingToken: null,
             signingStatus: PartySigningStatus.NOT_SENT,
+            inviteSentAt: null,
+            signingViewedAt: null,
+            rejectedAt: null,
           },
         });
       }),
@@ -881,6 +959,7 @@ export const sendDocument: SendDocument<
             signerEmail: email,
             signingToken: tokens[idx]!,
             signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+            inviteSentAt: new Date(),
           },
         });
       }),
@@ -924,13 +1003,43 @@ const signingTokenParamSchema = z.object({
   token: z.string().min(16),
 });
 
+export type SigningFieldPayload = {
+  id: string;
+  type: SignatureFieldType;
+  xPos: number;
+  yPos: number;
+  pageNumber: number;
+  placementOrder: number;
+  documentPartyId: string;
+  partyLabel: string;
+};
+
+/** Saved answers already stored for this document (any party). Anonymous signers load these via token — no login. */
+export type SigningSavedFieldValue = {
+  fieldId: string;
+  documentPartyId: string;
+  textValue: string | null;
+  imagePresignedUrl: string | null;
+};
+
 export type SigningInvitePayload = {
   documentName: string;
   partyLabel: string;
   signerName: string;
+  signerEmail: string | null;
+  documentPartyId: string;
+  documentId: string;
+  inviterEmail: string | null;
+  parts: PdfPart[];
+  fields: SigningFieldPayload[];
+  /** Submitted values for fields on this document (e.g. earlier signers in order). */
+  savedFieldValues: SigningSavedFieldValue[];
 };
 
-/** Used by the public signing HTTP API (no auth). */
+/**
+ * Public signing payload (no login). The opaque `token` identifies the party row;
+ * template `fields` and any `savedFieldValues` come from DB so signers never need a User account.
+ */
 export async function lookupSigningInviteByToken(
   token: string,
 ): Promise<SigningInvitePayload | null> {
@@ -944,23 +1053,188 @@ export async function lookupSigningInviteByToken(
       signingToken: parsed.data.token,
       signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
     },
-    include: { document: true },
+    include: {
+      document: {
+        include: {
+          user: { select: { email: true } },
+        },
+      },
+    },
   });
 
   if (!party) {
     return null;
   }
 
+  if (!party.signingViewedAt) {
+    await prisma.documentParty.update({
+      where: { id: party.id },
+      data: { signingViewedAt: new Date() },
+    });
+  }
+
+  const document = party.document;
+  const appends = await prisma.documentAppend.findMany({
+    where: { documentId: document.id },
+    orderBy: { sortOrder: "asc" },
+  });
+
+  const parties = await prisma.documentParty.findMany({
+    where: { documentId: document.id },
+    orderBy: { sortOrder: "asc" },
+  });
+  const labelByPartyId = Object.fromEntries(
+    parties.map((p) => [p.id, p.label]),
+  );
+
+  const fields = await prisma.signatureField.findMany({
+    where: { documentId: document.id },
+    orderBy: [{ documentPartyId: "asc" }, { placementOrder: "asc" }, { pageNumber: "asc" }, { id: "asc" }],
+  });
+
+  const baseUrl = await getPresignedUrl(document.fileUrl, 3600);
+  const appendParts: PdfPart[] = await Promise.all(
+    appends.map(async (a, idx) => ({
+      partId: a.id,
+      label: `Append ${idx + 1}`,
+      presignedUrl: await getPresignedUrl(a.fileUrl, 3600),
+    })),
+  );
+
+  const parts: PdfPart[] = [
+    {
+      partId: `base:${document.id}`,
+      label: document.name,
+      presignedUrl: baseUrl,
+    },
+    ...appendParts,
+  ];
+
+  const completionRows = await prisma.signatureFieldCompletion.findMany({
+    where: {
+      documentParty: { documentId: document.id },
+    },
+  });
+
+  const savedFieldValues: SigningSavedFieldValue[] = await Promise.all(
+    completionRows.map(async (c) => {
+      let imagePresignedUrl: string | null = null;
+      if (c.imageObjectKey) {
+        imagePresignedUrl = await getPresignedUrl(c.imageObjectKey, 3600);
+      }
+      return {
+        fieldId: c.signatureFieldId,
+        documentPartyId: c.documentPartyId,
+        textValue: c.textValue,
+        imagePresignedUrl,
+      };
+    }),
+  );
+
   return {
-    documentName: party.document.name,
+    documentName: document.name,
     partyLabel: party.label,
     signerName: party.signerName?.trim() || party.label,
+    signerEmail: party.signerEmail,
+    documentPartyId: party.id,
+    documentId: document.id,
+    inviterEmail: document.user?.email ?? null,
+    parts,
+    fields: fields.map((f) => ({
+      id: f.id,
+      type: f.type,
+      xPos: f.xPos,
+      yPos: f.yPos,
+      pageNumber: f.pageNumber,
+      placementOrder: f.placementOrder,
+      documentPartyId: f.documentPartyId,
+      partyLabel: labelByPartyId[f.documentPartyId] ?? "",
+    })),
+    savedFieldValues,
+  };
+}
+
+function fieldUsesImageStorage(type: SignatureFieldType): boolean {
+  return (
+    type === SignatureFieldType.SIGNATURE || type === SignatureFieldType.IMAGE
+  );
+}
+
+const signingCompleteBodySchema = z.object({
+  completions: z
+    .array(
+      z.object({
+        fieldId: z.string().uuid(),
+        textValue: z.string().optional(),
+        imageBase64: z.string().optional(),
+      }),
+    )
+    .optional()
+    .default([]),
+});
+
+function decodeBase64ImagePayload(raw: string): Buffer {
+  const trimmed = raw.trim();
+  const base64 = trimmed.includes(",")
+    ? trimmed.split(",", 2)[1]!
+    : trimmed;
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(base64, "base64");
+  } catch {
+    throw new HttpError(400, "Invalid image data.");
+  }
+  if (buf.length === 0) {
+    throw new HttpError(400, "Empty image.");
+  }
+  if (buf.length > MAX_SIGNATURE_BYTES) {
+    throw new HttpError(400, "Image is too large.");
+  }
+  if (!isPngBuffer(buf)) {
+    throw new HttpError(400, "Signature image must be PNG.");
+  }
+  return buf;
+}
+
+/** Public decline flow (no auth). Invalidates the signing link and records rejection. */
+export async function rejectSigningByToken(
+  token: string,
+): Promise<{ ok: boolean; message: string }> {
+  const parsed = signingTokenParamSchema.safeParse({ token });
+  if (!parsed.success) {
+    throw new HttpError(400, "Invalid signing link.");
+  }
+
+  const party = await prisma.documentParty.findFirst({
+    where: {
+      signingToken: parsed.data.token,
+      signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+    },
+  });
+
+  if (!party) {
+    throw new HttpError(400, "Invalid or expired signing link.");
+  }
+
+  await prisma.documentParty.update({
+    where: { id: party.id },
+    data: {
+      signingStatus: PartySigningStatus.REJECTED,
+      signingToken: null,
+      rejectedAt: new Date(),
+    },
+  });
+
+  return {
+    ok: true,
+    message: "You have declined to sign this document.",
   };
 }
 
 /** Used by the public signing HTTP API (no auth). */
 export async function finalizePartySigningByToken(
   token: string,
+  rawBody?: unknown,
 ): Promise<{ ok: boolean; message: string }> {
   const parsed = signingTokenParamSchema.safeParse({ token });
   if (!parsed.success) {
@@ -980,6 +1254,88 @@ export async function finalizePartySigningByToken(
 
   if (!party || party.signingStatus !== PartySigningStatus.AWAITING_SIGNATURE) {
     throw new HttpError(400, "Invalid or expired signing link.");
+  }
+
+  const myFields = await prisma.signatureField.findMany({
+    where: { documentId: party.documentId, documentPartyId: party.id },
+    orderBy: [{ placementOrder: "asc" }, { pageNumber: "asc" }, { id: "asc" }],
+  });
+
+  if (myFields.length > 0) {
+    const bodyParsed = signingCompleteBodySchema.safeParse(rawBody ?? {});
+    if (!bodyParsed.success) {
+      throw new HttpError(400, "Invalid request body.");
+    }
+    const { completions } = bodyParsed.data;
+    const byFieldId = new Map(completions.map((c) => [c.fieldId, c]));
+    const ownerUserId = party.document.userId;
+
+    for (const f of myFields) {
+      const c = byFieldId.get(f.id);
+      if (!c) {
+        throw new HttpError(
+          400,
+          `Missing value for a required field (${f.type} on page ${f.pageNumber}).`,
+        );
+      }
+      if (fieldUsesImageStorage(f.type)) {
+        if (!c.imageBase64?.trim()) {
+          throw new HttpError(
+            400,
+            `Missing image for ${f.type} field on page ${f.pageNumber}.`,
+          );
+        }
+        const buf = decodeBase64ImagePayload(c.imageBase64);
+        const key = `${ownerUserId}/signing/${party.documentId}/${party.id}/${f.id}.png`;
+        await uploadFile({
+          objectKey: key,
+          data: buf,
+          contentType: "image/png",
+        });
+        await prisma.signatureFieldCompletion.upsert({
+          where: {
+            signatureFieldId_documentPartyId: {
+              signatureFieldId: f.id,
+              documentPartyId: party.id,
+            },
+          },
+          create: {
+            signatureFieldId: f.id,
+            documentPartyId: party.id,
+            imageObjectKey: key,
+          },
+          update: {
+            textValue: null,
+            imageObjectKey: key,
+          },
+        });
+      } else {
+        const text = c.textValue?.trim();
+        if (!text) {
+          throw new HttpError(
+            400,
+            `Missing text for ${f.type} field on page ${f.pageNumber}.`,
+          );
+        }
+        await prisma.signatureFieldCompletion.upsert({
+          where: {
+            signatureFieldId_documentPartyId: {
+              signatureFieldId: f.id,
+              documentPartyId: party.id,
+            },
+          },
+          create: {
+            signatureFieldId: f.id,
+            documentPartyId: party.id,
+            textValue: text,
+          },
+          update: {
+            textValue: text,
+            imageObjectKey: null,
+          },
+        });
+      }
+    }
   }
 
   const documentId = party.documentId;
@@ -1006,6 +1362,7 @@ export async function finalizePartySigningByToken(
         data: {
           signingToken: newToken,
           signingStatus: PartySigningStatus.AWAITING_SIGNATURE,
+          inviteSentAt: new Date(),
         },
       });
       const baseUrl = getClientBaseUrl();
@@ -1024,7 +1381,7 @@ export async function finalizePartySigningByToken(
   }
 
   return { ok: true, message: "Signing recorded. Thank you." };
-};
+}
 
 function duplicateDocumentDisplayName(original: string): string {
   const max = 500;
@@ -1162,6 +1519,7 @@ export const duplicateDocument: DuplicateDocument<
           xPos: f.xPos,
           yPos: f.yPos,
           pageNumber: f.pageNumber,
+          placementOrder: f.placementOrder,
           documentId: created.id,
           documentPartyId: newPartyId,
         },
